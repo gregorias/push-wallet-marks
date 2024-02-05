@@ -1,5 +1,5 @@
 [package]
-name = "push-wallet-marks"
+name = "git-auto-commit"
 version = "0.1.0"
 edition = "2021"
 

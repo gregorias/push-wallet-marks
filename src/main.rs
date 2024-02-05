@@ -1,7 +1,11 @@
 use std::path::Path;
+use std::path::PathBuf;
 
+use git2::Index;
 use git2::Repository;
 use git2::Status;
+use git2::StatusEntry;
+use git2::Statuses;
 use tempfile::tempdir;
 
 const MARK_FILES: [&str; 2] = [
@@ -10,7 +14,26 @@ const MARK_FILES: [&str; 2] = [
 ];
 const REPO_PATH: &str = "/Users/grzesiek/wallet";
 
-/// Copiues the content of one directory P to another.
+/// A modification of git2::StatusEntry that owns its path.
+///
+/// Owning the path gives us a saner interface for working with the path without
+/// checking the Option every time.
+struct StatusEntryBetter {
+    pub path: PathBuf,
+    pub status: Status,
+}
+
+impl StatusEntryBetter {
+    fn from_status_entry(status_entry: &StatusEntry) -> Option<Self> {
+        let path: &str = status_entry.path()?;
+        Some(StatusEntryBetter {
+            path: PathBuf::from(path),
+            status: status_entry.status(),
+        })
+    }
+}
+
+/// Copies the content of one directory P to another.
 ///
 /// # Arguments
 ///
@@ -69,10 +92,7 @@ fn is_index_status(s: &Status) -> bool {
     s.intersects(index_status)
 }
 
-fn is_index_empty(repo: &Repository) -> Result<bool, String> {
-    let statuses = repo
-        .statuses(None)
-        .map_err(|e| format!("Could not fetch file statuses: {}", e))?;
+fn is_index_empty(statuses: &Statuses) -> Result<bool, String> {
     for status in statuses.into_iter() {
         if is_index_status(&status.status()) {
             return Ok(false);
@@ -81,7 +101,30 @@ fn is_index_empty(repo: &Repository) -> Result<bool, String> {
     return Ok(true);
 }
 
-fn push_wallet_marks<P>(repo_path: P) -> Result<(), String>
+fn filter_statuses_by_path<'a>(
+    statuses: &'a Statuses<'a>,
+    mark_files: &[&str],
+) -> Vec<StatusEntry<'a>> {
+    statuses
+        .into_iter()
+        .filter(|status_entry: &StatusEntry| -> bool {
+            for mark_file in mark_files {
+                if *mark_file == status_entry.path().unwrap_or("") {
+                    return true;
+                }
+            }
+            return false;
+        })
+        .collect()
+}
+
+/// Stages and pushes mark files in the wallet repository upstream.
+///
+/// # Arguments
+///
+/// * `repo_path` - The wallet repository path.
+/// * `mark_files` - The mark files to potentially push.
+fn push_wallet_marks<P>(repo_path: P, mark_files: &[&str]) -> Result<(), String>
 where
     P: AsRef<Path>,
 {
@@ -93,22 +136,64 @@ where
         )
     })?;
 
-    if !is_index_empty(&repo)? {
-        return Err(String::from("The repository’s index is not empty. There’s possibly a manual change ongoing so we’re aborting."));
+    let statuses: Statuses = repo
+        .statuses(None)
+        .map_err(|e| format!("Could not fetch file statuses: {}", e))?;
+
+    let mut index: Index = repo
+        .index()
+        .map_err(|e| format!("Could not fetch the index: {}", e))?;
+
+    if !is_index_empty(&statuses)? {
+        println!("The repository’s index is not empty. There’s possibly a manual change ongoing so we’re aborting the push.");
+        return Ok(());
     }
 
-    let statuses = repo.statuses(None).unwrap();
-    // TODO: If there are no changes to the mark files, exit early.
-    // TODO: If the changes do something else, then changing content, exit early. Possibly report.
+    let mark_file_statuses: Vec<StatusEntry> = filter_statuses_by_path(&statuses, mark_files);
+    let mark_file_statuses: Vec<StatusEntryBetter> = mark_file_statuses
+        .iter()
+        .map(StatusEntryBetter::from_status_entry)
+        .collect::<Option<Vec<StatusEntryBetter>>>()
+        .map_or(Err("Could not convert all mark files to a path."), Ok)?;
 
-    statuses
+    if mark_file_statuses.is_empty() {
+        println!("No mark files to push.");
+        return Ok(());
+    }
+
+    for mark_file_status in &mark_file_statuses {
+        if mark_file_status.status == Status::WT_MODIFIED {
+            index
+                .add_path(mark_file_status.path.as_path())
+                .map_err(|e| {
+                    format!(
+                        "Could not add {} to the index: {}",
+                        mark_file_status.path.display(),
+                        e
+                    )
+                })?;
+        } else {
+            return Err(format!(
+                "The mark file {} has an unexpected status: {:?}.",
+                mark_file_status.path.display(),
+                mark_file_status.status
+            ));
+        }
+    }
+    // NOTE: Let’s see.
+
+    // TODO: If we commit & push, what happens to the original repository?
+    // Ideally, I shouldn’t have to pull and resolve conflicts manually.
+
+    mark_file_statuses
         .into_iter()
-        .for_each(|s| println!("{:?}, {:?}", s.path(), s.status()));
+        .for_each(|s| println!("{:?}, {:?}", s.path, s.status));
     println!("Hello, world!");
     return Ok(());
 }
 
-fn main() {
-    let temp_dir: tempfile::TempDir = copy_repository(REPO_PATH).unwrap();
-    push_wallet_marks(temp_dir.path()).unwrap();
+fn main() -> Result<(), String> {
+    let temp_dir: tempfile::TempDir = copy_repository(REPO_PATH)?;
+    push_wallet_marks(temp_dir.path(), &MARK_FILES)?;
+    return Ok(());
 }
