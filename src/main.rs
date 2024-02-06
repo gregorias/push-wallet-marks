@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use clap::Parser;
 use git2::Index;
 use git2::Repository;
 use git2::Status;
@@ -8,11 +9,20 @@ use git2::StatusEntry;
 use git2::Statuses;
 use tempfile::tempdir;
 
+const ABOUT: &str = "Commits tracked files if changed.";
+
+#[derive(Debug, Parser)]
+#[command(author, version, about, long_about = ABOUT)]
+struct Cli {
+    /// The repository path.
+    #[arg(short, long, value_name = "FILE")]
+    repo: PathBuf,
+}
+
 const MARK_FILES: [&str; 2] = [
     "updates/findata-funnel-pull-gpayslip-success-mark",
     "updates/findata-funnel-success-mark",
 ];
-const REPO_PATH: &str = "/Users/grzesiek/wallet";
 
 /// A modification of git2::StatusEntry that owns its path.
 ///
@@ -118,6 +128,13 @@ fn filter_statuses_by_path<'a>(
         .collect()
 }
 
+fn is_repo_path(repo_path: &Path) -> bool {
+    match Repository::open(repo_path) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
 /// Stages and pushes mark files in the wallet repository upstream.
 ///
 /// # Arguments
@@ -193,7 +210,16 @@ where
 }
 
 fn main() -> Result<(), String> {
-    let temp_dir: tempfile::TempDir = copy_repository(REPO_PATH)?;
+    let cli = Cli::parse();
+
+    if !is_repo_path(&cli.repo) {
+        return Err(format!(
+            "The path `{}` is not a valid repository.",
+            cli.repo.display()
+        ));
+    }
+
+    let temp_dir: tempfile::TempDir = copy_repository(cli.repo)?;
     push_wallet_marks(temp_dir.path(), &MARK_FILES)?;
     return Ok(());
 }
