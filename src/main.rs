@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -11,18 +12,18 @@ use tempfile::tempdir;
 
 const ABOUT: &str = "Commits tracked files if changed.";
 
+/// The command-line interface parameters.
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = ABOUT)]
 struct Cli {
     /// The repository path.
-    #[arg(short, long, value_name = "FILE")]
+    #[arg(short, long, value_name = "DIR")]
     repo: PathBuf,
-}
 
-const MARK_FILES: [&str; 2] = [
-    "updates/findata-funnel-pull-gpayslip-success-mark",
-    "updates/findata-funnel-success-mark",
-];
+    /// Relative paths of files to be automatically committed.
+    #[arg(short, long, value_name = "FILES...")]
+    auto_files: Vec<PathBuf>,
+}
 
 /// A modification of git2::StatusEntry that owns its path.
 ///
@@ -111,19 +112,20 @@ fn is_index_empty(statuses: &Statuses) -> Result<bool, String> {
     return Ok(true);
 }
 
-fn filter_statuses_by_path<'a>(
-    statuses: &'a Statuses<'a>,
-    mark_files: &[&str],
-) -> Vec<StatusEntry<'a>> {
+fn filter_statuses_by_path<'a, P>(statuses: &'a Statuses<'a>, paths: &[P]) -> Vec<StatusEntry<'a>>
+where
+    P: AsRef<Path>,
+{
+    let path_strings: HashSet<String> = paths
+        .iter()
+        .filter_map(|p| p.as_ref().to_str())
+        .map(|s| s.to_string())
+        .collect();
+
     statuses
         .into_iter()
         .filter(|status_entry: &StatusEntry| -> bool {
-            for mark_file in mark_files {
-                if *mark_file == status_entry.path().unwrap_or("") {
-                    return true;
-                }
-            }
-            return false;
+            path_strings.contains(status_entry.path().unwrap_or(""))
         })
         .collect()
 }
@@ -141,9 +143,10 @@ fn is_repo_path(repo_path: &Path) -> bool {
 ///
 /// * `repo_path` - The wallet repository path.
 /// * `mark_files` - The mark files to potentially push.
-fn push_wallet_marks<P>(repo_path: P, mark_files: &[&str]) -> Result<(), String>
+fn push_wallet_marks<P, A>(repo_path: P, auto_files: &[A]) -> Result<(), String>
 where
     P: AsRef<Path>,
+    A: AsRef<Path>,
 {
     let repo = Repository::open(repo_path.as_ref()).map_err(|e| {
         format!(
@@ -166,7 +169,7 @@ where
         return Ok(());
     }
 
-    let mark_file_statuses: Vec<StatusEntry> = filter_statuses_by_path(&statuses, mark_files);
+    let mark_file_statuses: Vec<StatusEntry> = filter_statuses_by_path(&statuses, auto_files);
     let mark_file_statuses: Vec<StatusEntryBetter> = mark_file_statuses
         .iter()
         .map(StatusEntryBetter::from_status_entry)
@@ -220,6 +223,6 @@ fn main() -> Result<(), String> {
     }
 
     let temp_dir: tempfile::TempDir = copy_repository(cli.repo)?;
-    push_wallet_marks(temp_dir.path(), &MARK_FILES)?;
+    push_wallet_marks(temp_dir.path(), &cli.auto_files)?;
     return Ok(());
 }
